@@ -24,11 +24,6 @@ const fetch = require('isomorphic-fetch')
 const client = feathers()
   .configure(feathers.fetch(fetch))
 
-module.exports = client
-```
-
-```js
-// types.js
 const t = require('tcomb')
 
 const Thing = t.struct({
@@ -39,36 +34,11 @@ const Thing = t.struct({
 
 const Things = t.List(Thing, 'Things')
 
-module.exports = { Thing, Things }
-```
+const actions = require('feathers-action').createActionCreators(client, Things)
+const reducer = require('feathers-action').createReducer(Things)
 
-```js
-// actions.js
-const createActionCreators = require('feathers-action').createActionCreators
-const client = require('./client')
-const Things = require('./types').Things
-
-const actions = createActions(client, Things)
-// or actionCreators = createActionCreators(...)
-
-module.exports = actions
-```
-
-```js
-// reducer.js
-const createReducer = require('feathers-action').createReducer
-const Things = require('./types').Things
-
-const reducer = createReducer(Things)
-```
-
-```js
-// store.js
 const redux = require('redux')
 const thunk = require('redux-thunk')
-const reducer = require('./reducer')
-
-module.exports = createStore
 
 const createStoreWithMiddleware = redux.applyMiddleware(thunk)(redux.createStore)
 
