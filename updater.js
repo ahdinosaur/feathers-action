@@ -84,7 +84,6 @@ function createRequestUpdater (actionTypes) {
     return pipe(
       assocPath([cid, 'result'], result),
       assocPath([cid, 'error'], error),
-      assocPath([cid, 'isReady'], true)
     )
   }
 
