@@ -171,6 +171,7 @@ const createEpics = ({ actionTypes, actionCreators, service }) => {
 
           return Rx.Observable.of(actionCreators.start(cid, { service, method, args }))
             .concat(requestAction$)
+            .concat(Rx.Observable.of(actionCreators.ready(cid)))
             .concat(Rx.Observable.of(actionCreators.complete(cid)))
             .catch(err => Rx.Observable.of(actionCreators.error(cid, err)))
             .takeUntil(cancelAction$)

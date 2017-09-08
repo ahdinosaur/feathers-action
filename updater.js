@@ -83,7 +83,7 @@ function createRequestUpdater (actionTypes) {
   function handleComplete ({ cid, result, error }) {
     return pipe(
       assocPath([cid, 'result'], result),
-      assocPath([cid, 'error'], error)
+      assocPath([cid, 'error'], error),
     )
   }
 
