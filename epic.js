@@ -1,9 +1,7 @@
-const { combineEpics } = require('redux-observable')
+const { combineEpics, ofType } = require('redux-observable')
 const is = require('typeof-is')
 const either = require('ramda/src/either')
 const merge = require('ramda/src/merge')
-const map = require('ramda/src/map')
-const __ = require('ramda/src/__')
 const mapObjIndexed = require('ramda/src/mapObjIndexed')
 const values = require('ramda/src/values')
 const pathEq = require('ramda/src/pathEq')
@@ -11,8 +9,22 @@ const propEq = require('ramda/src/propEq')
 const find = require('ramda/src/find')
 const not = require('ramda/src/not')
 const filter = require('ramda/src/filter')
-// TODO split into individual modules
-const Rx = require('rxjs/Rx')
+const { of, from, concat: indexConcat, merge: indexMerge } = require('rxjs')
+const {
+  mergeMap,
+  first,
+  concatMap,
+  pairwise,
+  map,
+  mapTo,
+  take,
+  catchError,
+  startWith,
+  concat,
+  takeWhile,
+  filter: rxFilter,
+  merge: rxMerge
+} = require('rxjs/operators')
 
 const createActionTypes = require('./action-types')
 const createActionCreators = require('./actions')
@@ -28,6 +40,7 @@ function createEpic (options) {
   const actionCreators = createActionCreators(options)
 
   const epics = createEpics({ actionTypes, actionCreators, service })
+
   return combineEpics(...values(epics))
 }
 
@@ -42,48 +55,59 @@ const requestArgs = {
 
 const createRequestHandlers = actions => {
   return {
-    find: (response$, { cid }) => Rx.Observable
-      .concat(
-        // set all initial results
-        response$.first().concatMap(values => Rx.Observable.of(
+    find: (response$, { cid }) => indexConcat(
+      // set all initial results
+      from(response$).pipe(
+        first(),
+        concatMap(values => of(
           actions.setAll(cid, values),
           actions.ready(cid)
-        )),
-        // update the next results as a pairwise diff
-        response$.pairwise().concatMap(([prev, next]) => {
+        ))
+      ),
+      // update the next results as a pairwise diff
+      from(response$).pipe(
+        pairwise(),
+        concatMap(([prev, next]) => {
           const removed = getRemoved(prev, next)
           const diff = [
             actions.unsetAll(cid, removed),
             actions.setAll(cid, next)
           ]
-          return Rx.Observable.of(...diff)
+          return of(...diff)
+        })
+      )
+    ),
+    get: (response$, { cid, args }) => indexMerge(
+      from(response$).pipe(
+        map(value => {
+          // `feathers-reactive` return null on 'removed' events
+          return (value === null)
+            ? actions.unset(cid, args.id)
+            : actions.set(cid, args.id, value)
         })
       ),
-    get: (response$, { cid, args }) => Rx.Observable
-      .merge(
-        response$
-          .map(value => {
-            // `feathers-reactive` return null on 'removed' events
-            return (value === null)
-              ? actions.unset(cid, args.id)
-              : actions.set(cid, args.id, value)
-          }),
-        response$.first().mapTo(actions.ready(cid))
-      ),
+      from(response$).pipe(
+        first(),
+        mapTo(actions.ready(cid))
+      )
+    ),
     create: (response$, { cid, args }) => {
       const setOptimistic = actions.set(cid, cid, args.data)
       const unsetOptimistic = actions.unset(cid, cid)
 
-      const responseAction$ = response$
-        .take(1)
-        .concatMap(value => Rx.Observable.of(
+      const responseAction$ = from(response$).pipe(
+        take(1),
+        concatMap(value => of(
           actions.set(cid, value.id, value),
           actions.ready(cid)
-        ))
-        .catch(err => Rx.Observable.of(actions.error(cid, err)))
-
-      return Rx.Observable.of(setOptimistic)
-        .concat(responseAction$.startWith(unsetOptimistic))
+        )),
+        catchError(err => of(actions.error(cid, err)))
+      )
+      return of(setOptimistic).pipe(
+        concat(responseAction$.pipe(
+          startWith(unsetOptimistic))
+        )
+      )
     },
     update: createUpdateOrPatchHandler({
       method: 'update',
@@ -97,48 +121,52 @@ const createRequestHandlers = actions => {
         return merge(previousData, args.data)
       }
     }),
-    remove: (response$, { cid, args, service, store }) => {
-      const state = store.getState()
+    remove: (response$, { cid, args, service, state$ }) => {
+      const state = state$.value
       const previousData = state[service][args.id]
       const setOptimistic = actions.unset(cid, args.id)
       const resetOptimistic = actions.set(cid, args.id, previousData)
 
-      const responseAction$ = response$
-        .take(1)
-        .concatMap(value => Rx.Observable.of(
+      const responseAction$ = from(response$).pipe(
+        take(1),
+        concatMap(value => of(
           actions.unset(cid, value.id),
           actions.ready(cid)
-        ))
-        .catch(err => Rx.Observable.of(resetOptimistic, actions.error(cid, err)))
+        )),
+        catchError(err => of(resetOptimistic, actions.error(cid, err)))
+      )
 
-      return Rx.Observable.of(setOptimistic)
-        .concat(responseAction$)
+      return of(setOptimistic).pipe(
+        concat(responseAction$)
+      )
     }
   }
 
   // TODO: only rollback when _all_ updates for that id have errored
   // TODO: find a way to pass in actions for all updates of the same id
   function createUpdateOrPatchHandler (options) {
-    const { method, getOptimisticData } = options
+    const { getOptimisticData } = options
 
-    return (response$, { cid, args, service, store }) => {
-      const state = store.getState()
+    return (response$, { cid, args, service, state$ }) => {
+      const state = state$.value
       const previousData = state[service][args.id]
       const optimisticData = getOptimisticData({ args, previousData })
 
       const setOptimistic = actions.set(cid, args.id, optimisticData)
       const resetOptimistic = actions.set(cid, args.id, previousData)
 
-      const responseAction$ = response$
-        .take(1)
-        .concatMap(value => Rx.Observable.of(
+      const responseAction$ = from(response$).pipe(
+        take(1),
+        concatMap(value => of(
           actions.set(cid, value.id, value),
           actions.ready(cid)
-        ))
-        .catch(err => Rx.Observable.of(resetOptimistic, actions.error(cid, err)))
+        )),
+        catchError(err => of(resetOptimistic, actions.error(cid, err)))
+      )
 
-      return Rx.Observable.of(setOptimistic)
-        .concat(responseAction$)
+      return of(setOptimistic).pipe(
+        concat(responseAction$)
+      )
     }
   }
 }
@@ -149,33 +177,37 @@ const createEpics = ({ actionTypes, actionCreators, service }) => {
   const isEndAction = either(isCompleteAction, isErrorAction)
   const requestHandlers = createRequestHandlers(actionCreators)
   const mapRequestHandlers = mapObjIndexed((requestHandler, method) => {
-    return (action$, store, deps) => {
+    return (action$, state$, deps) => {
       assertFeathersDep(deps)
 
       const { feathers } = deps
 
       const requester = createRequester({ method, feathers, service })
 
-      return action$.ofType(actionTypes[method])
-        .mergeMap(action => {
+      return action$.pipe(
+        ofType(actionTypes[method]),
+        mergeMap(action => {
           const args = action.payload
           const { cid } = action.meta
 
           const response$ = requester(args)
-          const requestAction$ = requestHandler(response$, { cid, args, service, store })
+          const requestAction$ = requestHandler(response$, { cid, args, service, state$ })
 
-          const cidAction$ = action$.filter(isCid(cid))
-          const completeAction$ = cidAction$.filter(isCompleteAction)
-          const errorAction$ = cidAction$.filter(isErrorAction)
-          const cancelAction$ = completeAction$.merge(errorAction$)
+          const cidAction$ = action$.pipe(rxFilter(isCid(cid)))
+          const completeAction$ = cidAction$.pipe(rxFilter(isCompleteAction))
+          const errorAction$ = cidAction$.pipe(rxFilter(isErrorAction))
+          const cancelAction$ = completeAction$.pipe(rxMerge(errorAction$))
 
-          return Rx.Observable.of(actionCreators.start(cid, { service, method, args }))
-            .concat(requestAction$)
-            .concat(Rx.Observable.of(actionCreators.complete(cid)))
-            .catch(err => Rx.Observable.of(actionCreators.error(cid, err)))
-            .takeUntil(cancelAction$)
-            .filter(endOnce(isEndAction))
+          return of(actionCreators.start(cid, { service, method, args })).pipe(
+            concat(requestAction$),
+            concat(of(actionCreators.complete(cid))),
+            catchError(err => of(actionCreators.error(cid, err))),
+            takeWhile(endOnce(isEndAction))
+            // takeUntil(cancelAction$),
+            // rxFilter(endOnce(isEndAction))
+          )
         })
+      )
     }
   })
   return mapRequestHandlers(requestHandlers)
